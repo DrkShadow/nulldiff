@@ -2,7 +2,7 @@
 
 opt=()
 if [ "$1" = "-o" ]; then
-	opt=( "-O2" )
+	opt=( "-O2" -march=native -mtune=native)
 fi
 
 #gcc -std=c23 -ggdb3 -o nullcombine  nullcombine.c

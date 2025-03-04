@@ -49,23 +49,51 @@ int main(int argc, char **argv) {
 	// -r: show only ratio
 	// -4: show only 4096-byte block diff/same
 	// -n: don't count null blocks as indifferent
+	// -b: show if there is a null block
+	// -f: show filename if there is a null block
 	// -
+	
+	bool opt_showfile = false;
+	bool opt_shownull = false;
+	int fidx = 1;
 
-	int in1 = open(argv[1], O_NOATIME, O_RDONLY);
+	for (int i = 1; i < argc; i++) {
+		if (strcmp(argv[i], "-f") == 0) {
+			opt_showfile = true;
+			if (fidx == i)
+				fidx++;
+		}
+		else if (strcmp(argv[i], "-b") == 0) {
+			opt_shownull = true;
+			if (fidx == i)
+				fidx++;
+		}
+		else if (strcmp(argv[i], "--") == 0) {
+			fidx = i + 1;
+			break;
+		}
+	}
+	if (fidx >= argc) {
+		fprintf(stderr, "Error: file not detected on command line.\n");
+		return 1;
+	}
+
+	const char *fpath = argv[fidx];
+	int in1 = open(fpath, O_NOATIME, O_RDONLY);
 	if (in1 == -1) {
-		fprintf(stderr, "Unable to open %s", argv[1]);
+		fprintf(stderr, "Unable to open %s", fpath);
 		perror(", ");
 		return -1;
 	}
 
 	struct stat stat_buf;
 	if (fstat(in1, &stat_buf) == -1) {
-		fprintf(stderr, "Error: Unable to stat %s\n", argv[1]);
+		fprintf(stderr, "Error: Unable to stat %s\n", fpath);
 		close(in1);
 		return -1;
 	}
 	if (!S_ISREG(stat_buf.st_mode)) {
-		fprintf(stderr, "Error: I'm not able to work with anything but regular files. (%s)\n", argv[1]);
+		fprintf(stderr, "Error: I'm not able to work with anything but regular files. (%s)\n", fpath);
 		close(in1);
 		return -1;
 	}
@@ -87,12 +115,35 @@ int main(int argc, char **argv) {
 		// No null blocks. Only holes.
 		return 0;
 	}
-	
 
-	const uint8_t *const in1map = mmap(NULL, fin1.size, PROT_READ, MAP_PRIVATE | MAP_NORESERVE | MAP_NONBLOCK, in1, 0);
+	size_t next_hole = lseek(fin1.fd, 0, SEEK_HOLE);
+
+	// If we have a hole, that will be a null block.
+	if (next_hole <= stat_buf.st_size) {
+		close(in1);
+		if (opt_shownull) {
+			if (opt_showfile) {
+				printf("Null encountered: %s\n", fpath);
+			}
+			else {
+				printf("Null encountered\n");
+			}
+		}
+		else if (opt_showfile) {
+			printf("%s\n", fpath);
+		}
+
+		return 1;
+	}
+
+	// We just checked for a hole, so the data starts at 0.
+	size_t f_off = 0;
+	lseek(fin1.fd, 0, SEEK_SET);
+
+	const uint8_t *const in1map = mmap(NULL, fin1.size, PROT_READ, MAP_PRIVATE | MAP_NORESERVE | MAP_NONBLOCK, fin1.fd, 0);
 	if (in1map == MAP_FAILED) {
 		close(in1);
-		fprintf(stderr, "Error: unable to mmap %s, ", argv[1]);
+		fprintf(stderr, "Error: unable to mmap %s, ", fpath);
 		perror("");
 		return -1;
 	}
@@ -125,11 +176,7 @@ int main(int argc, char **argv) {
 		}
 	}
 
-	size_t f_off = 0;
 	size_t unmap_off = 0;	// both will have the same ranges mapped.
-
-	size_t next_hole = lseek(in1, 0, SEEK_HOLE);
-	f_off = lseek(in1, 0, SEEK_DATA);
 
 	while (f_off < fin1.size && f_off >= 0) {
 		if (unlikely(f_off == (size_t)-1)) {
@@ -167,6 +214,19 @@ int main(int argc, char **argv) {
 			// Oh hey -- found a null block! Report true.
 			munmap((void *)(in1map + unmap_off), fin1.size - unmap_off);
 			close(in1);
+
+			if (opt_shownull) {
+				if (opt_showfile) {
+					printf("Null encountered: %s\n", fpath);
+				}
+				else {
+					printf("Null encountered\n");
+				}
+			}
+			else if (opt_showfile) {
+				printf("%s\n", fpath);
+			}
+
 			return 1;
 		}
 
