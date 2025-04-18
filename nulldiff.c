@@ -27,21 +27,22 @@ typedef struct {
 		const int fd;
 	} f_in_info_t;
 
-static inline size_t find_next_hole(f_in_info_t *fin, size_t *const next_hole, size_t f_off) {
-	if (*next_hole > f_off)
+static inline size_t find_next_data(const f_in_info_t fin[const restrict static 1], size_t next_hole[const restrict static 1], size_t f_off) {
+	if (unlikely(*next_hole > f_off))
 		return f_off;
 
 	// We're at a hole. Find the next data.
 	const size_t next_data = lseek(fin->fd, f_off, SEEK_DATA);
-	if (next_data == (size_t)-1 && errno == ENXIO)
+	if (unlikely(next_data == (size_t)-1)) { // && errno == ENXIO) {
+		// There's no more data, and caller need to detect past end-of-file
 		return -1;
+	}
 
 	if (next_data > f_off)
 		f_off = next_data;
 
-	// Ok, now find the next hole.
-	const size_t hole = lseek(fin->fd, next_data, SEEK_HOLE);
-	*next_hole = hole;
+	// Ok, now find the next hole. This will always be positive, unless error.
+	*next_hole = lseek(fin->fd, f_off, SEEK_HOLE);
 
 	return f_off;
 }
@@ -197,9 +198,11 @@ int main(int argc, char **argv) {
 
 	// Check for holes. Start at the earliest data.
 	// returns fsize if no hole.
-	size_t in1_hole = lseek(fin1.fd, f_off, SEEK_HOLE);
-	size_t in2_hole = lseek(fin2.fd, f_off, SEEK_HOLE);
-	off_t next_hole = MIN(in1_hole, in2_hole);
+	size_t next_hole = ({ // scope
+			size_t in1_hole = lseek(fin1.fd, f_off, SEEK_HOLE);
+			size_t in2_hole = lseek(fin2.fd, f_off, SEEK_HOLE);
+			MIN(in1_hole, in2_hole);
+		});
 
 	// Setup: madvise.
 	//madvise(in1map, in1_size, MADV_SEQUENTIAL);
@@ -222,35 +225,41 @@ int main(int argc, char **argv) {
 	
 	// We stop at the last part of the file with data. After that, they're null-equal.
 	while (f_off < max_size) {
-		// Helps find holes and data chunks. Also informational, /proc/.../fdinfo/
+		// Informational, /proc/.../fdinfo/
 		lseek(fin1.fd, f_off, SEEK_SET);
 		lseek(fin2.fd, f_off, SEEK_SET);
 
 		if (f_off >= next_hole) {
-			size_t in1_hole, in2_hole;
+			size_t in1_hole = 0, in2_hole = 0;
 
-			f_off = find_next_hole(&fin1, &in1_hole, f_off);
+			f_off = find_next_data(&fin1, &in1_hole, f_off);
 			if (f_off == (size_t)-1)
 				break;	// the rest is hole -- same, excluding nulls.
 
-			f_off = find_next_hole(&fin2, &in2_hole, f_off);
-			if (f_off == (size_t)-1)
+			size_t new_off2 = find_next_data(&fin2, &in2_hole, f_off);
+			if (new_off2 == (size_t)-1)
 				break;	// the rest is hole -- same, excluding nulls.
+
+			if (unlikely(new_off2 > f_off))
+				f_off = new_off2;
 
 			next_hole = MIN(in1_hole, in2_hole);
+
+			if (unlikely(next_hole == (size_t)(off_t)-1))
+				next_hole = max_size;
 		}
 
 		// unmap_off is always aligned, so I don't need to align this.
 		if (f_off - unmap_off >= PAGE_SIZE) {
-			// I check this every 1MB, so int.
+			// I check this every 1MB
 			const int unmap_sz = (f_off - unmap_off) & ~PAGE_SIZE_bits;
-			munmap((void *)in1map + unmap_off, unmap_sz - 1);
-			munmap((void *)in2map + unmap_off, unmap_sz - 1);
+			munmap((void *)in1map + unmap_off, unmap_sz);
+			munmap((void *)in2map + unmap_off, unmap_sz);
 			unmap_off += unmap_sz;
 		}
 
 		// madv_off is the end of the _SEQUENTIAL range. update it every 1MB.
-		if (f_off - madv_off > (1 >> 20)) {
+		if (f_off - madv_off > (1 << 20)) {
 			madv_off = f_off & PAGE_SIZE_bits_not;
 			const int madv_len = MIN(2 << 20, next_hole - madv_off);
 
@@ -258,7 +267,7 @@ int main(int argc, char **argv) {
 			madvise((void *)in1map + madv_off, madv_len, MADV_SEQUENTIAL);
 			madvise((void *)in2map + madv_off, madv_len, MADV_SEQUENTIAL);
 
-			if (madv_off + (2 << 20) < next_hole) {
+			if (max_size > (2 << 20)) {
 				const int madv_len = MIN(2 << 20, next_hole - (madv_off + (2 << 20)));
 				madvise((void *)in1map + madv_off + (2 << 20), madv_len, MADV_WILLNEED);
 				madvise((void *)in2map + madv_off + (2 << 20), madv_len, MADV_WILLNEED);
@@ -268,7 +277,8 @@ int main(int argc, char **argv) {
 
 		// compare 1MB at a time, and then loop for madvise.
 		// Take the aligned 1MB block, add 1MB to that, and min of that and next_hole.
-		int compsize = MIN((f_off & ~((size_t)(1 << 20) - 1)) + (1 << 20), next_hole) - f_off;
+		int compsize = MIN(MIN(max_size, 1 << 20), next_hole - f_off);
+		//int compsize = MIN((f_off & ~((size_t)(1 << 20) - 1)) + (1 << 20), next_hole) - f_off;
 		int compblock = MIN(PAGE_SIZE, compsize);
 		while (compsize > 0 && (
 					memcmp(in1map + f_off, in2map + f_off, compblock) == 0 ||
