@@ -146,7 +146,7 @@ int main(int argc, char **argv) {
 		return 1;
 	}
 	const uint8_t *const in2map = mmap(NULL, fin2.size, PROT_READ, MAP_PRIVATE | MAP_NORESERVE | MAP_NONBLOCK, fin2.fd, 0);
-	if (in1map == MAP_FAILED) {
+	if (in2map == MAP_FAILED) {
 		munmap((void *)in1map, in1_size);
 		fclose(in1);
 		fclose(in2);
@@ -207,21 +207,29 @@ int main(int argc, char **argv) {
 	// Setup: madvise.
 	//madvise(in1map, in1_size, MADV_SEQUENTIAL);
 	//madvise(in2map, in2_size, MADV_SEQUENTIAL);
+	off_t madv_off = 0;
 	{
 		const size_t align_off = f_off & PAGE_SIZE_bits_not;
 		const int madv_size = MIN(max_size - align_off, MIN(2 << 20, next_hole - align_off));
 
 		madvise((void *)in1map + align_off, madv_size, MADV_SEQUENTIAL);
 		madvise((void *)in2map + align_off, madv_size, MADV_SEQUENTIAL);
+		madv_off = align_off;
 
 		const size_t remaining = MIN(4<<20, max_size - align_off);
 		if (max_size - align_off > (2 << 20)) {
 			madvise((void *)in1map + (2 << 20) + align_off, remaining, MADV_WILLNEED);
 			madvise((void *)in2map + (2 << 20) + align_off, remaining, MADV_WILLNEED);
+			madv_off = (2 << 20) + align_off;
 		}
 	}
 
-	off_t madv_off = 0;
+	if (f_off > PAGE_SIZE) {
+		const size_t unmap_sz = (f_off - unmap_off) & ~PAGE_SIZE_bits;
+		munmap((void *)in1map, unmap_sz);
+		munmap((void *)in2map, unmap_sz);
+		unmap_off = unmap_sz;
+	}
 	
 	// We stop at the last part of the file with data. After that, they're null-equal.
 	while (f_off < max_size) {
@@ -251,8 +259,8 @@ int main(int argc, char **argv) {
 
 		// unmap_off is always aligned, so I don't need to align this.
 		if (f_off - unmap_off >= PAGE_SIZE) {
-			// I check this every 1MB
-			const int unmap_sz = (f_off - unmap_off) & ~PAGE_SIZE_bits;
+			// I check this every 1MB -- or after every hole
+			const size_t unmap_sz = (f_off - unmap_off) & ~PAGE_SIZE_bits;
 			munmap((void *)in1map + unmap_off, unmap_sz);
 			munmap((void *)in2map + unmap_off, unmap_sz);
 			unmap_off += unmap_sz;
@@ -293,8 +301,8 @@ int main(int argc, char **argv) {
 		}
 
 		if (f_off - unmap_off >= PAGE_SIZE) {
-			// I check this every 1MB, so int.
-			const int unmap_sz = (f_off - unmap_off) & ~PAGE_SIZE_bits;
+			// I check this every 1MB -- or after every hole
+			const size_t unmap_sz = (f_off - unmap_off) & ~PAGE_SIZE_bits;
 			munmap((void *)in1map + unmap_off, unmap_sz - 1);
 			munmap((void *)in2map + unmap_off, unmap_sz - 1);
 			unmap_off += unmap_sz;
