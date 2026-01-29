@@ -2,6 +2,7 @@
 
 #define _GNU_SOURCE
 #include <unistd.h>
+#include <sys/stat.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -245,9 +246,12 @@ recalc_blocksize:
 
 	// We may have had nulls at the end. Set the length equal to the biggest file.
 	int filepos = ftell(in1) > ftell(in2) ? ftell(in1) : ftell(in2);
-	const int truncres = ftruncate(fileno(stdout), filepos);
-	if (truncres < 0) {
-		perror("Truncating file to final length");
+	struct stat thingstat;
+	if (fstat(fileno(stdout), &thingstat) == 0 && S_ISREG(thingstat.st_mode)) {
+		const int truncres = ftruncate(fileno(stdout), filepos);
+		if (truncres < 0) {
+			perror("Truncating file to final length");
+		}
 	}
 
 	fclose(in1);
